@@ -63,6 +63,11 @@ jobs:
           )"
           test "$version" = "$expected"
           echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Configure release tag identity
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - name: Create or verify immutable tag
         env:
           VERSION: ${{ steps.version.outputs.value }}
