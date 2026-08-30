@@ -68,8 +68,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Create or verify immutable tag
+      - name: Create, verify or repair the pre-release tag
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.value }}
         shell: bash
         run: |
@@ -78,12 +79,22 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
             git fetch origin "refs/tags/$VERSION:refs/tags/$VERSION" --force
             tag_sha="$(git rev-list -n 1 "$VERSION")"
-            test "$tag_sha" = "$head_sha"
+            if [[ "$tag_sha" != "$head_sha" ]]; then
+              if gh release view "$VERSION" >/dev/null 2>&1; then
+                echo "refusing to move released tag $VERSION" >&2
+                exit 1
+              fi
+              git push origin ":refs/tags/$VERSION"
+              git tag -d "$VERSION"
+              git tag -a "$VERSION" -m "Signal Pipeline $VERSION" HEAD
+              git push origin "$VERSION"
+            fi
           else
             git tag -a "$VERSION" -m "Signal Pipeline $VERSION" HEAD
             git push origin "$VERSION"
           fi
-      - name: Build deterministic release archives
+          test "$(git rev-list -n 1 "$VERSION")" = "$head_sha"
+      - name: Build and verify deterministic release archives
         env:
           VERSION: ${{ steps.version.outputs.value }}
         shell: bash
@@ -94,8 +105,11 @@ jobs:
           git archive --format=tar --prefix="signal-pipeline-$VERSION/" HEAD > "dist/signal-pipeline-$VERSION.tar"
           gzip -n "dist/signal-pipeline-$VERSION.tar"
           git archive --format=zip --prefix="signal-pipeline-$VERSION/" -o "dist/signal-pipeline-$VERSION.zip" HEAD
-          (cd dist && sha256sum signal-pipeline-* > SHA256SUMS.txt)
-          sha256sum -c dist/SHA256SUMS.txt
+          (
+            cd dist
+            sha256sum signal-pipeline-* > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
       - name: Create or repair GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
