@@ -1,0 +1,48 @@
+name: Publish Release Branch
+
+on:
+  create:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.ref_type == 'branch' && startsWith(github.ref, 'release/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - name: Validate release
+        env:
+          PYTHONPATH: src
+        run: python scripts/release_check.py
+      - name: Create tag, archives and GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ github.ref_name }}"
+          version="${version#release/}"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          expected="v$(python - <<'PY'
+          import tomllib
+          with open('pyproject.toml', 'rb') as handle:
+              print(tomllib.load(handle)['project']['version'])
+          PY
+          )"
+          [[ "$version" == "$expected" ]]
+          git tag "$version" "${{ github.sha }}"
+          git push origin "$version"
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="signal-pipeline-$version/" -o "dist/signal-pipeline-$version.tar.gz" main
+          git archive --format=zip --prefix="signal-pipeline-$version/" -o "dist/signal-pipeline-$version.zip" main
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          gh release create "$version" dist/*             --title "Signal Pipeline $version"             --notes-file "docs/release-notes/${version}.md"
