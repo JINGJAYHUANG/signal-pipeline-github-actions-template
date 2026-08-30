@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0",
+  "pipeline": {
+    "name": "synthetic-operations-watch",
+    "timezone": "Asia/Shanghai",
+    "max_signals": 5
+  },
+  "provider": {
+    "type": "synthetic",
+    "seed": 20260830,
+    "subjects": [
+      "ALPHA",
+      "BETA",
+      "GAMMA",
+      "DELTA",
+      "EPSILON",
+      "ZETA"
+    ],
+    "metrics": [
+      {
+        "name": "momentum",
+        "base": 0.62,
+        "jitter": 0.28,
+        "unit": "index"
+      },
+      {
+        "name": "quality",
+        "base": 0.7,
+        "jitter": 0.22,
+        "unit": "index"
+      },
+      {
+        "name": "risk",
+        "base": 0.38,
+        "jitter": 0.25,
+        "unit": "index"
+      }
+    ]
+  },
+  "selector": {
+    "type": "weighted_threshold",
+    "min_score": 0.67,
+    "criteria": [
+      {
+        "metric": "momentum",
+        "operator": "gte",
+        "threshold": 0.55,
+        "weight": 1.0
+      },
+      {
+        "metric": "quality",
+        "operator": "gte",
+        "threshold": 0.6,
+        "weight": 1.5
+      },
+      {
+        "metric": "risk",
+        "operator": "lte",
+        "threshold": 0.45,
+        "weight": 1.0
+      }
+    ]
+  },
+  "state": {
+    "ttl_days": 30
+  },
+  "delivery": {
+    "type": "console",
+    "file_path": "artifacts/latest-delivery.json",
+    "webhook_env": "SIGNAL_WEBHOOK_URL",
+    "timeout_seconds": 10,
+    "max_attempts": 3,
+    "base_backoff_seconds": 0.5
+  }
+}

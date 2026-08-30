@@ -1,0 +1,82 @@
+name: Scheduled Synthetic Signal Pipeline
+
+on:
+  schedule:
+    - cron: "0 23 * * 0-4"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Execution mode
+        required: true
+        default: dry-run
+        type: choice
+        options: [dry-run, live]
+      effective_date:
+        description: Optional YYYY-MM-DD; blank uses current UTC date
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scheduled-synthetic-signal
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - name: Configure Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Resolve execution inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mode="dry-run"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            mode="${{ inputs.mode }}"
+          fi
+          requested="${{ inputs.effective_date || '' }}"
+          effective_date="${requested:-$(date -u +%F)}"
+          [[ "$effective_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "effective_date=$effective_date" >> "$GITHUB_OUTPUT"
+      - name: Prepare isolated state branch for live mode
+        if: steps.inputs.outputs.mode == 'live'
+        run: python scripts/state_branch.py prepare --branch pipeline-state --worktree .pipeline-state --state-file state.json
+      - name: Run pipeline
+        env:
+          PYTHONPATH: src
+          SIGNAL_WEBHOOK_URL: ${{ secrets.SIGNAL_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_file="state/state.example.json"
+          delivery=""
+          if [[ "${{ steps.inputs.outputs.mode }}" == "live" ]]; then
+            state_file=".pipeline-state/state.json"
+            delivery="--delivery webhook"
+          fi
+          python -m signal_pipeline run             --config config/pipeline.example.json             --date "${{ steps.inputs.outputs.effective_date }}"             --mode "${{ steps.inputs.outputs.mode }}"             --state-file "$state_file"             --output-dir "artifacts/${{ github.run_id }}"             $delivery
+      - name: Commit acknowledged state
+        if: steps.inputs.outputs.mode == 'live' && success()
+        run: python scripts/state_branch.py commit --branch pipeline-state --worktree .pipeline-state --state-file state.json
+      - name: Upload run evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: signal-run-${{ github.run_id }}
+          path: artifacts/${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
