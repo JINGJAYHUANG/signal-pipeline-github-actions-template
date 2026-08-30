@@ -2,20 +2,32 @@ name: Publish Release Branch
 
 on:
   create:
+  push:
+    branches:
+      - "release/v*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: signal-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
-    if: github.event.ref_type == 'branch' && startsWith(github.event.ref, 'release/v')
+    if: >-
+      (github.event_name == 'create' &&
+       github.event.ref_type == 'branch' &&
+       startsWith(github.event.ref, 'release/v')) ||
+      (github.event_name == 'push' &&
+       startsWith(github.ref_name, 'release/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout immutable release candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ github.event.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -31,14 +43,17 @@ jobs:
         env:
           PYTHONPATH: src
         run: python scripts/release_check.py
-      - name: Create tag, archives and GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Resolve and validate version
+        id: version
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ github.event.ref }}"
-          version="${version#release/}"
+          if [[ "${{ github.event_name }}" == "create" ]]; then
+            release_ref="${{ github.event.ref }}"
+          else
+            release_ref="${{ github.ref_name }}"
+          fi
+          version="${release_ref#release/}"
           [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           expected="v$(python - <<'PY'
           import tomllib
@@ -47,23 +62,56 @@ jobs:
           PY
           )"
           test "$version" = "$expected"
-          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null 2>&1; then
-            echo "tag already exists: $version" >&2
-            exit 1
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Create or verify immutable tag
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            git fetch origin "refs/tags/$VERSION:refs/tags/$VERSION" --force
+            tag_sha="$(git rev-list -n 1 "$VERSION")"
+            test "$tag_sha" = "$head_sha"
+          else
+            git tag -a "$VERSION" -m "Signal Pipeline $VERSION" HEAD
+            git push origin "$VERSION"
           fi
-          if gh release view "$version" >/dev/null 2>&1; then
-            echo "release already exists: $version" >&2
-            exit 1
-          fi
-          git tag -a "$version" -m "Signal Pipeline $version" HEAD
-          git push origin "$version"
+      - name: Build deterministic release archives
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
           mkdir -p dist
-          git archive --format=tar.gz --prefix="signal-pipeline-$version/" -o "dist/signal-pipeline-$version.tar.gz" HEAD
-          git archive --format=zip --prefix="signal-pipeline-$version/" -o "dist/signal-pipeline-$version.zip" HEAD
+          git archive --format=tar --prefix="signal-pipeline-$VERSION/" HEAD > "dist/signal-pipeline-$VERSION.tar"
+          gzip -n "dist/signal-pipeline-$VERSION.tar"
+          git archive --format=zip --prefix="signal-pipeline-$VERSION/" -o "dist/signal-pipeline-$VERSION.zip" HEAD
           (cd dist && sha256sum signal-pipeline-* > SHA256SUMS.txt)
-          gh release create "$version" \
-            dist/signal-pipeline-$version.tar.gz \
-            dist/signal-pipeline-$version.zip \
-            dist/SHA256SUMS.txt \
-            --title "Signal Pipeline $version" \
-            --notes-file "docs/release-notes/${version}.md"
+          sha256sum -c dist/SHA256SUMS.txt
+      - name: Create or repair GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release edit "$VERSION" \
+              --title "Signal Pipeline $VERSION" \
+              --notes-file "docs/release-notes/${VERSION}.md"
+            gh release upload "$VERSION" \
+              "dist/signal-pipeline-$VERSION.tar.gz" \
+              "dist/signal-pipeline-$VERSION.zip" \
+              dist/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$VERSION" \
+              "dist/signal-pipeline-$VERSION.tar.gz" \
+              "dist/signal-pipeline-$VERSION.zip" \
+              dist/SHA256SUMS.txt \
+              --title "Signal Pipeline $VERSION" \
+              --notes-file "docs/release-notes/${VERSION}.md"
+          fi
