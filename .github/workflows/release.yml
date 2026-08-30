@@ -8,18 +8,26 @@ permissions:
 
 jobs:
   publish:
-    if: github.ref_type == 'branch' && startsWith(github.ref, 'release/v')
+    if: github.event.ref_type == 'branch' && startsWith(github.event.ref, 'release/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Checkout immutable release candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: main
+          ref: ${{ github.event.ref }}
           fetch-depth: 0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.12"
-      - name: Validate release
+      - name: Confirm release branch equals current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main --no-tags
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+      - name: Validate release candidate
         env:
           PYTHONPATH: src
         run: python scripts/release_check.py
@@ -29,7 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ github.ref_name }}"
+          version="${{ github.event.ref }}"
           version="${version#release/}"
           [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           expected="v$(python - <<'PY'
@@ -38,11 +46,24 @@ jobs:
               print(tomllib.load(handle)['project']['version'])
           PY
           )"
-          [[ "$version" == "$expected" ]]
-          git tag "$version" "${{ github.sha }}"
+          test "$version" = "$expected"
+          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null 2>&1; then
+            echo "tag already exists: $version" >&2
+            exit 1
+          fi
+          if gh release view "$version" >/dev/null 2>&1; then
+            echo "release already exists: $version" >&2
+            exit 1
+          fi
+          git tag -a "$version" -m "Signal Pipeline $version" HEAD
           git push origin "$version"
           mkdir -p dist
-          git archive --format=tar.gz --prefix="signal-pipeline-$version/" -o "dist/signal-pipeline-$version.tar.gz" main
-          git archive --format=zip --prefix="signal-pipeline-$version/" -o "dist/signal-pipeline-$version.zip" main
-          (cd dist && sha256sum * > SHA256SUMS.txt)
-          gh release create "$version" dist/*             --title "Signal Pipeline $version"             --notes-file "docs/release-notes/${version}.md"
+          git archive --format=tar.gz --prefix="signal-pipeline-$version/" -o "dist/signal-pipeline-$version.tar.gz" HEAD
+          git archive --format=zip --prefix="signal-pipeline-$version/" -o "dist/signal-pipeline-$version.zip" HEAD
+          (cd dist && sha256sum signal-pipeline-* > SHA256SUMS.txt)
+          gh release create "$version" \
+            dist/signal-pipeline-$version.tar.gz \
+            dist/signal-pipeline-$version.zip \
+            dist/SHA256SUMS.txt \
+            --title "Signal Pipeline $version" \
+            --notes-file "docs/release-notes/${version}.md"
